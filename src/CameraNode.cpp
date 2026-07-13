@@ -710,6 +710,11 @@ CameraNode::process(libcamera::Request *const request)
       // prepare image messages
       const libcamera::StreamConfiguration &cfg = stream->configuration();
 
+      // Pre-allocated pool avoids per-frame vector construction/destruction.
+      // buffer_info[buffer].size is constant (640×480×4) after stream config.
+      static thread_local std::vector<uint8_t> frame_buf;
+      frame_buf.resize(buffer_info[buffer].size);
+
       auto msg_img = std::make_unique<sensor_msgs::msg::Image>();
       auto msg_img_compressed = std::make_unique<sensor_msgs::msg::CompressedImage>();
 
@@ -722,8 +727,11 @@ CameraNode::process(libcamera::Request *const request)
         msg_img->step = cfg.stride;
         msg_img->encoding = get_ros_encoding(cfg.pixelFormat);
         msg_img->is_bigendian = (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__);
-        msg_img->data.resize(buffer_info[buffer].size);
-        memcpy(msg_img->data.data(), buffer_info[buffer].data, buffer_info[buffer].size);
+        // Move pre-allocated buffer into message (O(1), no reallocation).
+        // After first frame, frame_buf returns from glibc fastbin before
+        // resize() — same physical page, zero page-fault cost.
+        memcpy(frame_buf.data(), buffer_info[buffer].data, buffer_info[buffer].size);
+        msg_img->data.swap(frame_buf);
 
         // compress to jpeg
         if (pub_image_compressed->get_subscription_count()) {
