@@ -327,7 +327,7 @@ CameraNode::CameraNode(const rclcpp::NodeOptions &options)
     jpeg_range.step = 1;
     jpeg_quality_description.integer_range = {jpeg_range};
     // default to 95
-    jpeg_quality = declare_parameter<uint8_t>("jpeg_quality", 95, jpeg_quality_description);
+    jpeg_quality = declare_parameter<uint8_t>("jpeg_quality", 85, jpeg_quality_description);
   }
 
   // use_node_time parameter
@@ -338,8 +338,11 @@ CameraNode::CameraNode(const rclcpp::NodeOptions &options)
 
   // publisher for raw and compressed image
   pub_image = this->create_publisher<sensor_msgs::msg::Image>("~/image_raw", 1, pubopts);
+  rclcpp::QoS qos_compressed(rclcpp::KeepLast(1));
+  qos_compressed.best_effort();
+  qos_compressed.durability_volatile();
   pub_image_compressed =
-    this->create_publisher<sensor_msgs::msg::CompressedImage>("~/image_raw/compressed", 1, pubopts);
+    this->create_publisher<sensor_msgs::msg::CompressedImage>("~/image_raw/compressed", qos_compressed, pubopts);
   pub_ci = this->create_publisher<sensor_msgs::msg::CameraInfo>("~/camera_info", 1, pubopts);
   pub_diagnostics =
     this->create_publisher<diagnostic_msgs::msg::DiagnosticArray>("/diagnostics", 1);
