@@ -727,13 +727,10 @@ CameraNode::process(libcamera::Request *const request)
         msg_img->step = cfg.stride;
         msg_img->encoding = get_ros_encoding(cfg.pixelFormat);
         msg_img->is_bigendian = (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__);
-        // Move pre-allocated buffer into message (O(1), no reallocation).
-        // After first frame, frame_buf returns from glibc fastbin before
-        // resize() — same physical page, zero page-fault cost.
         memcpy(frame_buf.data(), buffer_info[buffer].data, buffer_info[buffer].size);
+        // Move data into message for jpeg compression even if no raw subscriber.
         msg_img->data.swap(frame_buf);
 
-        // compress to jpeg
         if (pub_image_compressed->get_subscription_count()) {
           try {
             compressImageMsg(*msg_img, *msg_img_compressed,
@@ -761,8 +758,10 @@ CameraNode::process(libcamera::Request *const request)
                                  stream->configuration().pixelFormat.toString());
       }
 
-      pub_image->publish(std::move(msg_img));
-      pub_image_compressed->publish(std::move(msg_img_compressed));
+      if (pub_image->get_subscription_count())
+        pub_image->publish(std::move(msg_img));
+      if (pub_image_compressed->get_subscription_count())
+        pub_image_compressed->publish(std::move(msg_img_compressed));
 
       sensor_msgs::msg::CameraInfo ci = cim.getCameraInfo();
       ci.header = hdr;
