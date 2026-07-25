@@ -402,7 +402,7 @@ CameraNode::CameraNode(const rclcpp::NodeOptions &options)
   use_node_time = declare_parameter<bool>("use_node_time", false, param_descr_use_node_time);
 
   // publisher for raw and compressed image
-  pub_image = this->create_publisher<sensor_msgs::msg::Image>("~/image_raw", 1, pubopts);
+  pub_image = this->create_publisher<sensor_msgs::msg::Image>("~/image_raw", rclcpp::SensorDataQoS().keep_last(1), pubopts);
   rclcpp::QoS qos_compressed(rclcpp::KeepLast(1));
   qos_compressed.best_effort();
   qos_compressed.durability_volatile();
