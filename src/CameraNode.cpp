@@ -121,8 +121,7 @@ private:
   std::atomic_uint8_t jpeg_quality;
 
   // preview/compressed stream downsampling
-  int compressed_width;
-  int compressed_height;
+  int compressed_scale;  // integer scale factor (2 = half res)
   int compressed_skip;   // frame skip factor (1 = no skip)
   int compressed_frame;  // frame counter
 
@@ -257,18 +256,24 @@ CameraNode::compressToJpeg(const cv::Mat &src,
     return false;
 
   cv::Mat img;
-  if (src.channels() == 2) {
-    // YUYV → BGR8
+  if (src.channels() == 2 && compressed_scale > 1) {
+    // 整数降采样: 在颜色转换前跳像素, 减少 cvtColor 处理量
+    int ow = src.cols / compressed_scale;
+    int oh = src.rows / compressed_scale;
+    cv::Mat dst(oh, ow, src.type());
+    for (int y = 0; y < oh; y++) {
+      const uint8_t *s = src.ptr<uint8_t>(y * compressed_scale);
+      uint8_t *d = dst.ptr<uint8_t>(y);
+      for (int x = 0; x < ow; x++) {
+        d[x * 2] = s[x * compressed_scale * 2];       // Y
+        d[x * 2 + 1] = s[x * compressed_scale * 2 + 1]; // UV
+      }
+    }
+    cv::cvtColor(dst, img, cv::COLOR_YUV2BGR_YUYV);
+  } else if (src.channels() == 2) {
     cv::cvtColor(src, img, cv::COLOR_YUV2BGR_YUYV);
   } else {
     img = src;
-  }
-
-  // resize
-  if (compressed_width > 0 && compressed_height > 0 &&
-      (img.cols != compressed_width || img.rows != compressed_height)) {
-    cv::resize(img, img, cv::Size(compressed_width, compressed_height),
-               0, 0, cv::INTER_LINEAR);
   }
 
   dst.header = hdr;
@@ -382,17 +387,13 @@ CameraNode::CameraNode(const rclcpp::NodeOptions &options)
     jpeg_quality = declare_parameter<uint8_t>("jpeg_quality", 85, jpeg_quality_description);
   }
 
-  // preview stream downsampling
-  compressed_width = declare_parameter<int>("compressed_width", 0);
-  compressed_height = declare_parameter<int>("compressed_height", 0);
-  int skip = declare_parameter<int>("compressed_skip", 1);
-  compressed_skip = std::max(1, skip);
+  // preview stream downsampling (integer scale factor)
+  compressed_scale = std::max<int>(1, declare_parameter<int>("compressed_scale", 2));
+  compressed_skip = std::max<int>(1, declare_parameter<int>("compressed_skip", 6));
   compressed_frame = 0;
-  if (compressed_width > 0 && compressed_height > 0) {
-    RCLCPP_INFO(get_logger(),
-      "compressed: %dx%d, skip=%d",
-      compressed_width, compressed_height, compressed_skip);
-  }
+  RCLCPP_INFO(get_logger(),
+    "compressed: 1/%d scale, skip=%d",
+    compressed_scale, compressed_skip);
 
   // use_node_time parameter
   rcl_interfaces::msg::ParameterDescriptor param_descr_use_node_time;
