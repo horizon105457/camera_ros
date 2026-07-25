@@ -120,6 +120,20 @@ private:
   // compression quality parameter
   std::atomic_uint8_t jpeg_quality;
 
+  // preview/compressed stream downsampling
+  int compressed_width;
+  int compressed_height;
+  int compressed_skip;   // frame skip factor (1 = no skip)
+  int compressed_frame;  // frame counter
+
+  /**
+   * Compress cv::Mat directly to JPEG with optional resize + frame skip.
+   * Avoids ROS message wrapping overhead.
+   */
+  bool compressToJpeg(const cv::Mat &src, const std_msgs::msg::Header &hdr,
+                       sensor_msgs::msg::CompressedImage &dst,
+                       const std::vector<int> &params);
+
   void
   requestComplete(libcamera::Request *const request);
 
@@ -231,6 +245,44 @@ compressImageMsg(const sensor_msgs::msg::Image &source,
 }
 
 
+bool
+CameraNode::compressToJpeg(const cv::Mat &src,
+                             const std_msgs::msg::Header &hdr,
+                             sensor_msgs::msg::CompressedImage &dst,
+                             const std::vector<int> &params)
+{
+  // frame skip (throttle)
+  compressed_frame++;
+  if (compressed_skip > 1 && (compressed_frame % compressed_skip) != 0)
+    return false;
+
+  cv::Mat img;
+  if (src.channels() == 2) {
+    // YUYV → BGR8
+    cv::cvtColor(src, img, cv::COLOR_YUV2BGR_YUYV);
+  } else {
+    img = src;
+  }
+
+  // resize
+  if (compressed_width > 0 && compressed_height > 0 &&
+      (img.cols != compressed_width || img.rows != compressed_height)) {
+    cv::resize(img, img, cv::Size(compressed_width, compressed_height),
+               0, 0, cv::INTER_LINEAR);
+  }
+
+  dst.header = hdr;
+  dst.format = "jpeg";
+  try {
+    cv::imencode(".jpg", img, dst.data, params);
+  } catch (const cv::Exception &e) {
+    RCLCPP_ERROR_STREAM(rclcpp::get_logger("camera"), e.what());
+    return false;
+  }
+  return true;
+}
+
+
 CameraNode::CameraNode(const rclcpp::NodeOptions &options)
     : Node("camera", options),
 #if CIM_HAS_NODE_INTERFACE
@@ -328,6 +380,18 @@ CameraNode::CameraNode(const rclcpp::NodeOptions &options)
     jpeg_quality_description.integer_range = {jpeg_range};
     // default to 95
     jpeg_quality = declare_parameter<uint8_t>("jpeg_quality", 85, jpeg_quality_description);
+  }
+
+  // preview stream downsampling
+  compressed_width = declare_parameter<int>("compressed_width", 0);
+  compressed_height = declare_parameter<int>("compressed_height", 0);
+  int skip = declare_parameter<int>("compressed_skip", 1);
+  compressed_skip = std::max(1, skip);
+  compressed_frame = 0;
+  if (compressed_width > 0 && compressed_height > 0) {
+    RCLCPP_INFO(get_logger(),
+      "compressed: %dx%d, skip=%d",
+      compressed_width, compressed_height, compressed_skip);
   }
 
   // use_node_time parameter
@@ -728,7 +792,8 @@ CameraNode::process(libcamera::Request *const request)
         msg_img->encoding = get_ros_encoding(cfg.pixelFormat);
         msg_img->is_bigendian = (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__);
         memcpy(frame_buf.data(), buffer_info[buffer].data, buffer_info[buffer].size);
-        msg_img->data = frame_buf;  // copy (frame_buf retains data for JPEG)
+        // swap: zero-copy for raw publish (frame_buf becomes empty)
+        msg_img->data.swap(frame_buf);
       }
       else if (format_type(cfg.pixelFormat) == FormatType::COMPRESSED) {
         assert(bytesused < buffer_info[buffer].size);
@@ -745,29 +810,24 @@ CameraNode::process(libcamera::Request *const request)
                                  stream->configuration().pixelFormat.toString());
       }
 
-      // 先发 raw, VIO 不等待 JPEG (实时性优先)
+      // 先发 raw (零拷贝, 不等待 JPEG)
       if (pub_image->get_subscription_count())
         pub_image->publish(std::move(msg_img));
 
-      // 再 JPEG 编码 + 发 compressed (非实时, 有订阅才执行)
+      // JPEG 编码 (从 buffer_info 直接读取, 额外一次 memcpy)
       if (format_type(cfg.pixelFormat) == FormatType::RAW &&
           pub_image_compressed->get_subscription_count()) {
         try {
-          auto jpeg_img = std::make_unique<sensor_msgs::msg::Image>();
-          jpeg_img->header = hdr;
-          jpeg_img->width = cfg.size.width;
-          jpeg_img->height = cfg.size.height;
-          jpeg_img->step = cfg.stride;
-          jpeg_img->encoding = get_ros_encoding(cfg.pixelFormat);
-          jpeg_img->is_bigendian = (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__);
-          jpeg_img->data = frame_buf;  // copy from retained buffer
-          compressImageMsg(*jpeg_img, *msg_img_compressed,
-                           {cv::IMWRITE_JPEG_QUALITY, jpeg_quality});
+          auto cv_img = cv::Mat(cfg.size.height, cfg.size.width, CV_8UC2,
+                                buffer_info[buffer].data);
+          if (compressToJpeg(cv_img, hdr, *msg_img_compressed,
+                             {cv::IMWRITE_JPEG_QUALITY, jpeg_quality})) {
+            pub_image_compressed->publish(std::move(msg_img_compressed));
+          }
         }
-        catch (const cv_bridge::Exception &e) {
+        catch (const cv::Exception &e) {
           RCLCPP_ERROR_STREAM(get_logger(), e.what());
         }
-        pub_image_compressed->publish(std::move(msg_img_compressed));
       }
 
       sensor_msgs::msg::CameraInfo ci = cim.getCameraInfo();
